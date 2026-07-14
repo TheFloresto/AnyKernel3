@@ -1008,10 +1008,10 @@ version_ge() {
 do_check_boot_version() {
   ui_print " " "  -> Check kernel version compatibility..."
 
-  # BYPASS: do.check_boot_version=0 in anykernel.sh skips check
+  # SKIPPED: do.check_boot_version=0 in anykernel.sh skips check
   if [ "$(file_getprop anykernel.sh do.check_boot_version)" != 1 ]; then
-    ui_print "  -> [BYPASS] do.check_boot_version=0: version check SKIPPED."
-    ui_print "  -> [BYPASS] Forced flash. Proceed with caution!"
+    ui_print "  -> [SKIPPED] do.check_boot_version=0: version check SKIPPED."
+    ui_print "  -> [SKIPPED] Forced flash. Proceed with caution!"
     return 1
   fi
 
@@ -1049,6 +1049,91 @@ do_check_boot_version() {
   fi
 
   ui_print "  -> Kernel version: COMPATIBLE ($new_ver >= $dev_ver)"
+}
+
+KEY_RESULT=""
+TIMEOUT_LIMIT=9999
+
+TIMEOUT_LIMIT=$(file_getprop anykernel.sh keycheck.timeout)
+TIMEOUT_LIMIT=${TIMEOUT_LIMIT:-10}
+
+get_now() {
+    read -r uptime _ < /proc/uptime
+    echo "${uptime%.*}"
+}
+
+find_volume_nodes() {
+    local active_nodes=""
+    for dev in /dev/input/event*; do
+        [ -e "$dev" ] || continue
+        local caps=""
+        caps=$(timeout 0.2 $BIN/getevent -p "$dev" 2>/dev/null)
+        [ $? -eq 124 ] && continue # Skip frozen nodes entirely
+        if echo "$caps" | grep -qE "KEY_VOLUMEUP|KEY_VOLUMEDOWN|0072|0073"; then
+            active_nodes="$active_nodes $dev"
+        fi
+    done
+    echo "$active_nodes"
+}
+
+VOLUME_DEVS=$(find_volume_nodes)
+
+handle_input() {
+    ui_print "Waiting for key release... (Auto-timeout in $TIMEOUT_LIMIT seconds)"
+    KEY_RESULT="TIMEOUT"
+    
+    rm -f /tmp/ak3_hit_*
+    
+    local pids=""
+    for dev in $VOLUME_DEVS; do
+        local node_num="${dev##*event}"
+        (
+            $BIN/getevent "$dev" 2>/dev/null | while read -r r_type r_code r_val; do
+                if [ "$r_type" = "0001" ] && [ "$r_val" = "00000000" ]; then
+                    case "$r_code" in
+                        0073|73) echo "up" > "/tmp/ak3_hit_${node_num}"; break ;;
+                        0072|72) echo "down" > "/tmp/ak3_hit_${node_num}"; break ;;
+                    esac
+                fi
+            done
+        ) &
+        pids="$pids $!"
+    done
+    
+    local START_TIME=$(get_now)
+    
+    while true; do
+        local CURRENT_TIME=$(get_now)
+        local ELAPSED=$(( CURRENT_TIME - START_TIME ))
+        
+        for dev in $VOLUME_DEVS; do
+            local node_num="${dev##*event}"
+            local hit_file="/tmp/ak3_hit_${node_num}"
+            
+            if [ -f "$hit_file" ]; then
+                local click_type=$(cat "$hit_file")
+                case "$click_type" in
+                    "up")   KEY_RESULT="KEY_VOLUMEUP" ;;
+                    "down") KEY_RESULT="KEY_VOLUMEDOWN" ;;
+                esac
+                break 2
+            fi
+        done
+        
+        if [ $ELAPSED -ge $TIMEOUT_LIMIT ]; then
+            ui_print "Timeout reached!"
+            break
+        fi
+        
+        sleep 0.05
+    done
+    
+    echo "$KEY_RESULT" > /tmp/ak3_key_result
+    {
+        kill -9 $pids 2>/dev/null
+        killall -9 getevent 2>/dev/null
+        rm -f /tmp/ak3_hit_*
+    } >/dev/null 2>&1
 }
 
 ### end methods

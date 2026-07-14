@@ -19,6 +19,7 @@ device.name5=
 supported.versions=
 supported.patchlevels=
 supported.vendorpatchlevels=
+keycheck.timeout=10
 '; } # end properties
 
 
